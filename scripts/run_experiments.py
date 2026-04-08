@@ -9,6 +9,8 @@ from blocs_estimation.ekf_building import BuildingEKF, camera_project
 from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements
 from blocs_estimation.observability import compute_observability_gramian, check_observability
 from blocs_control.altitude_controller import altitude_controller
+from blocs_control.mpc_controller import mpc_altitude_controller, AltitudeMPC, CovariancePredictionModel
+from blocs_control.lyapunov_analysis import LyapunovAnalyzer
 
 K = np.array([[500, 0, 320], [0, 500, 240], [0, 0, 1]], dtype=float)
 R_BC = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)
@@ -203,12 +205,180 @@ def experiment_noise():
     return results
 
 
+# ============ EXPERIMENT 5: MPC vs EXPONENTIAL CONTROLLER ============
+def experiment_mpc_comparison():
+    print("\n=== Experiment 5: MPC vs Exponential Controller ===")
+    buildings = building_grid()
+    M = buildings.shape[1]
+    n_seeds = 10
+    results = {}
+
+    for ctrl_name in ['exponential', 'mpc']:
+        errors_all = []
+        traces_all = []
+        altitudes_all = []
+        convergence_times = []
+
+        for seed in range(n_seeds):
+            np.random.seed(seed)
+            pos, rot, ts = generate_uav_trajectory('lawnmower', altitude=-80, duration=120, dt=0.5)
+            ekfs = {}
+            h_current = 80.0
+            final_errs = np.full(M, np.nan)
+            trace_history = []
+            alt_history = []
+            converged_at = None
+
+            for i in range(len(ts)):
+                dt_step = ts[i] - ts[i-1] if i > 0 else 0
+                for b_id in ekfs:
+                    ekfs[b_id].predict(dt_step)
+
+                if ekfs:
+                    traces = [e.trace_P() for e in ekfs.values()]
+                    mean_tr = np.mean(traces)
+
+                    if ctrl_name == 'exponential':
+                        h_current, _, _ = altitude_controller(mean_tr, h_current, max(dt_step, 0.01))
+                    else:
+                        h_current, _, _ = mpc_altitude_controller(
+                            traces, h_current, max(dt_step, 0.01), Q, R_PIXEL,
+                            horizon=8, mpc_dt=2.0, n_total_buildings=M)
+
+                    pos[2, i] = -h_current
+                    trace_history.append(mean_tr)
+                    alt_history.append(h_current)
+
+                    if converged_at is None and mean_tr < 50.0:
+                        converged_at = ts[i]
+                else:
+                    trace_history.append(900.0)
+                    alt_history.append(h_current)
+
+                for b in range(M):
+                    z, valid = camera_project(buildings[:, b], pos[:, i], rot[i], K, R_BC, t_BC)
+                    if valid:
+                        z_noisy = z + SIGMA * np.random.randn(2)
+                        if b not in ekfs:
+                            x0 = buildings[:, b] + np.array([15*np.random.randn(), 15*np.random.randn(), 5*np.random.randn()])
+                            ekfs[b] = BuildingEKF(x0, P0, Q, R_PIXEL)
+                        ekfs[b].update(z_noisy, pos[:, i], rot[i], K, R_BC, t_BC)
+
+            for b in range(M):
+                if b in ekfs:
+                    final_errs[b] = ekfs[b].position_error(buildings[:, b])
+
+            errors_all.append(float(np.nanmean(final_errs)))
+            traces_all.append(trace_history)
+            altitudes_all.append(alt_history)
+            convergence_times.append(converged_at if converged_at else 120.0)
+
+        results[ctrl_name] = {
+            'mean_rmse': float(np.mean(errors_all)),
+            'std_rmse': float(np.std(errors_all)),
+            'mean_convergence_time': float(np.mean(convergence_times)),
+            'std_convergence_time': float(np.std(convergence_times)),
+            'trace_history_seed0': traces_all[0] if traces_all else [],
+            'altitude_history_seed0': altitudes_all[0] if altitudes_all else [],
+        }
+        print(f"  {ctrl_name}: RMSE={results[ctrl_name]['mean_rmse']:.2f} +/- "
+              f"{results[ctrl_name]['std_rmse']:.2f} m, "
+              f"conv_time={results[ctrl_name]['mean_convergence_time']:.1f} s")
+
+    return results
+
+
+# ============ EXPERIMENT 6: LYAPUNOV STABILITY VERIFICATION ============
+def experiment_lyapunov():
+    print("\n=== Experiment 6: Lyapunov Stability Verification ===")
+    analyzer = LyapunovAnalyzer(Q, R_PIXEL, f=500.0, h_min=20.0, h_max=120.0, n_visible=8)
+
+    # 1. Theoretical equilibrium analysis
+    eq_exp = analyzer.equilibrium_exponential(alpha=3.0, J_ref=900.0)
+    print(f"  Exponential controller equilibrium:")
+    print(f"    J* = {eq_exp['J_star']:.2f}, h* = {eq_exp['h_star']:.2f} m")
+    print(f"    Stable: {eq_exp['is_stable']}, rate: {eq_exp['convergence_rate']:.4f}")
+
+    # 2. ISS proof
+    iss = analyzer.prove_input_to_state_stability(alpha=3.0, J_ref=900.0)
+    print(f"  ISS proof: valid={iss['proof_valid']}, margin={iss['stability_margin']:.1f}")
+
+    # 3. Lyapunov certificate over range
+    J_range = np.linspace(0.1, 1500, 500)
+    cert = analyzer.compute_lyapunov_certificate(J_range, alpha=3.0, J_ref=900.0)
+    print(f"  Lyapunov negative definite: {cert['is_negative_definite']}")
+
+    # 4. Empirical verification from simulation
+    buildings = building_grid()
+    M = buildings.shape[1]
+    np.random.seed(42)
+    pos, rot, ts = generate_uav_trajectory('lawnmower', altitude=-80, duration=120, dt=0.5)
+    ekfs = {}
+    h_current = 80.0
+    sim_traces, sim_altitudes = [], []
+
+    for i in range(len(ts)):
+        dt_step = ts[i] - ts[i-1] if i > 0 else 0
+        for b_id in ekfs:
+            ekfs[b_id].predict(dt_step)
+        if ekfs:
+            mean_tr = np.mean([e.trace_P() for e in ekfs.values()])
+            h_current, _, _ = altitude_controller(mean_tr, h_current, max(dt_step, 0.01))
+            pos[2, i] = -h_current
+            sim_traces.append(mean_tr)
+            sim_altitudes.append(h_current)
+        else:
+            sim_traces.append(900.0)
+            sim_altitudes.append(h_current)
+        for b in range(M):
+            z, valid = camera_project(buildings[:, b], pos[:, i], rot[i], K, R_BC, t_BC)
+            if valid:
+                z_noisy = z + SIGMA * np.random.randn(2)
+                if b not in ekfs:
+                    x0 = buildings[:, b] + np.array([15*np.random.randn(), 15*np.random.randn(), 5*np.random.randn()])
+                    ekfs[b] = BuildingEKF(x0, P0, Q, R_PIXEL)
+                ekfs[b].update(z_noisy, pos[:, i], rot[i], K, R_BC, t_BC)
+
+    emp = analyzer.equilibrium_mpc(np.array(sim_traces), np.array(sim_altitudes))
+    print(f"  Empirical: stable={emp['is_stable']}, V_ratio={emp['V_ratio']:.4f}, "
+          f"decrease_frac={emp['decrease_fraction']:.2f}")
+
+    results = {
+        'equilibrium': {
+            'J_star': float(eq_exp['J_star']),
+            'h_star': float(eq_exp['h_star']),
+            'is_stable': bool(eq_exp['is_stable']),
+            'convergence_rate': float(eq_exp['convergence_rate']),
+        },
+        'iss_proof': {
+            'valid': bool(iss['proof_valid']),
+            'stability_margin': float(iss['stability_margin']),
+            'globally_stable': bool(iss['is_globally_stable']),
+        },
+        'lyapunov_certificate': {
+            'negative_definite': bool(cert['is_negative_definite']),
+            'J_star': float(cert['J_star']),
+        },
+        'empirical': {
+            'stable': bool(emp['is_stable']),
+            'V_ratio': float(emp['V_ratio']),
+            'decrease_fraction': float(emp['decrease_fraction']),
+            'convergence_rate': float(emp.get('convergence_rate', 0)),
+        },
+        'sim_traces': [float(t) for t in sim_traces[::10]],  # downsample
+        'sim_altitudes': [float(a) for a in sim_altitudes[::10]],
+    }
+    return results
+
+
 if __name__ == '__main__':
     os.makedirs(RESULTS_DIR, exist_ok=True)
     all_results = {}
     all_results['baseline'] = experiment_baseline()
     all_results['observability'] = experiment_observability()
     all_results['noise'] = experiment_noise()
+    all_results['mpc_comparison'] = experiment_mpc_comparison()
+    all_results['lyapunov'] = experiment_lyapunov()
 
     with open(os.path.join(RESULTS_DIR, 'all_experiments.json'), 'w') as f:
         json.dump(all_results, f, indent=2)

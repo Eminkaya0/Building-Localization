@@ -9,6 +9,8 @@ from blocs_estimation.ekf_building import BuildingEKF, camera_project, camera_pr
 from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements
 from blocs_estimation.observability import compute_observability_gramian, check_observability
 from blocs_control.altitude_controller import altitude_controller, rate_limiter
+from blocs_control.mpc_controller import mpc_altitude_controller, AltitudeMPC, CovariancePredictionModel
+from blocs_control.lyapunov_analysis import LyapunovAnalyzer
 
 # Shared test fixtures
 K = np.array([[500, 0, 320], [0, 500, 240], [0, 0, 1]], dtype=float)
@@ -126,6 +128,61 @@ class TestAltitudeController:
         h_cmd_high = rate_limiter(200.0, 120.0, 1.0)
         assert h_cmd_low >= 20.0
         assert h_cmd_high <= 120.0
+
+
+class TestMPCController:
+    def test_mpc_high_uncertainty_descends(self):
+        traces = [900.0] * 8
+        h_cmd, h_des, info = mpc_altitude_controller(traces, 80.0, 0.5, Q, R_PIXEL)
+        assert h_cmd < 80.0, f"MPC should descend when uncertain, got h_cmd={h_cmd:.1f}"
+
+    def test_mpc_low_uncertainty_ascends(self):
+        traces = [5.0] * 8
+        h_cmd, h_des, info = mpc_altitude_controller(traces, 40.0, 0.5, Q, R_PIXEL)
+        assert h_cmd > 40.0, f"MPC should ascend when confident, got h_cmd={h_cmd:.1f}"
+
+    def test_mpc_respects_bounds(self):
+        traces = [900.0] * 8
+        h_cmd, _, _ = mpc_altitude_controller(traces, 25.0, 0.5, Q, R_PIXEL, h_min=20.0)
+        assert h_cmd >= 20.0, f"h_cmd={h_cmd:.1f} below h_min"
+
+    def test_mpc_rate_limiting(self):
+        traces = [900.0] * 8
+        h_cmd, _, _ = mpc_altitude_controller(traces, 80.0, 1.0, Q, R_PIXEL, h_dot_max=3.0)
+        assert abs(h_cmd - 80.0) <= 3.0 + 1e-6, f"Rate limit violated: delta={abs(h_cmd-80):.2f}"
+
+    def test_mpc_returns_info(self):
+        traces = [500.0] * 4
+        _, _, info = mpc_altitude_controller(traces, 60.0, 0.5, Q, R_PIXEL)
+        assert 'optimal_sequence' in info
+        assert 'cost' in info
+        assert len(info['optimal_sequence']) > 0
+
+
+class TestLyapunovStability:
+    def test_equilibrium_exists(self):
+        analyzer = LyapunovAnalyzer(Q, R_PIXEL, f=500.0)
+        eq = analyzer.equilibrium_exponential(alpha=3.0, J_ref=900.0)
+        assert eq['J_star'] > 0, "Equilibrium trace must be positive"
+        assert 20.0 <= eq['h_star'] <= 120.0, f"h*={eq['h_star']:.1f} out of bounds"
+
+    def test_equilibrium_is_stable(self):
+        analyzer = LyapunovAnalyzer(Q, R_PIXEL, f=500.0)
+        eq = analyzer.equilibrium_exponential(alpha=3.0, J_ref=900.0)
+        assert eq['is_stable'], f"Equilibrium not stable, dF/dJ={eq['dFdJ']:.4f}"
+        assert eq['convergence_rate'] > 0
+
+    def test_iss_proof_valid(self):
+        analyzer = LyapunovAnalyzer(Q, R_PIXEL, f=500.0)
+        iss = analyzer.prove_input_to_state_stability()
+        assert iss['proof_valid'], "ISS proof should be valid"
+        assert iss['stability_margin'] > 1.0
+
+    def test_lyapunov_negative_definite(self):
+        analyzer = LyapunovAnalyzer(Q, R_PIXEL, f=500.0)
+        J_range = np.linspace(0.5, 1500, 200)
+        cert = analyzer.compute_lyapunov_certificate(J_range)
+        assert cert['is_negative_definite'], "dV/dt must be negative definite"
 
 
 if __name__ == '__main__':
