@@ -19,15 +19,16 @@ This extends prior work (QUASAR) which used YOLOv8 + odometry-based inverse proj
 
 ## Tech Stack
 
-- ROS2 Humble, Gazebo Harmonic, Python, YOLOv8 (ultralytics)
+- **MATLAB** for core algorithms: EKF, altitude controller, observability analysis, experiments
+- **ROS2 Humble + Gazebo Harmonic** for UAV simulation environment
+- **Python + YOLOv8** (ultralytics) for building detection (ROS2 node)
 - PX4 SITL or AscTec Firefly (RotorS) for UAV simulation
-- NumPy, SciPy, Matplotlib, Pandas
 
 ## Key Design Decisions
 
 - **Theory first:** All math derivations in `docs/theory/` must be complete before implementing
-- **EKF is ROS-independent:** `src/blocs_estimation/ekf_building.py` is pure Python, no ROS deps, unit-testable in isolation
-- **ROS code lives in node wrappers only**
+- **MATLAB for core math:** EKF, controller, and analysis are in `matlab/` — pure MATLAB, no ROS deps, unit-testable in isolation
+- **Hybrid architecture:** MATLAB handles estimation/control, Python/ROS2 handles perception/simulation
 - **No QUASAR code reuse** — this is a fresh implementation
 
 ## Project Phases
@@ -42,22 +43,25 @@ This extends prior work (QUASAR) which used YOLOv8 + odometry-based inverse proj
 ## Repository Layout
 
 ```
+matlab/
+  ekf/                — BuildingEKF.m, MultiBuildingTracker.m
+  control/            — altitude_controller.m, rate_limiter.m
+  analysis/           — observability Gramian, rank checks, ellipsoid plots
+  experiments/        — experiment runners, metrics, plotting
+  utils/              — camera projection, Jacobian, trajectory generation
+  tests/              — unit tests (run_all_tests.m)
 docs/theory/          — EKF derivation, observability analysis, control law
 docs/experiments/     — Experiment plans and results documentation
 docs/paper/           — LaTeX source (IEEE template)
-src/blocs_perception/ — YOLOv8 wrapper, bbox -> measurement conversion
-src/blocs_estimation/ — EKF implementation (pure Python)
-src/blocs_control/    — Altitude controller, trajectory planner
+src/blocs_perception/ — YOLOv8 wrapper, bbox -> measurement conversion (Python/ROS2)
 src/blocs_simulation/ — Gazebo worlds and ROS2 launch files
-scripts/              — Experiment runners, metrics, plotting
 data/ground_truth/    — Building positions per world (YAML)
-data/results/         — Experiment outputs (CSV)
-tests/                — Unit tests (EKF math, etc.)
+data/results/         — Experiment outputs (.mat, CSV)
 ```
 
 ## For Claude Code
 
-- Keep theory docs and implementation in sync — if the math changes, update the code and vice versa
-- Type hints and docstrings everywhere in Python code
+- Keep theory docs and MATLAB implementation in sync
+- MATLAB code uses proper docstrings (help-style comments)
 - Commit after each completed phase
 - Reference QUASAR as baseline, never copy its code

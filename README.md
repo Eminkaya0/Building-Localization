@@ -34,39 +34,54 @@ YOLOv8 Detection → Bounding Box Center (u,v) → EKF Update → Position Estim
 
 ## Prerequisites
 
-- Ubuntu 22.04
-- ROS2 Humble
-- Gazebo Harmonic
-- Python 3.10+
+- **MATLAB R2023a+** (core algorithms, experiments, plotting)
+- Ubuntu 22.04 (for simulation)
+- ROS2 Humble + Gazebo Harmonic (simulation environment)
+- Python 3.10+ with YOLOv8 (perception)
 - PX4 Autopilot (SITL) or RotorS (AscTec Firefly)
 
-## Installation
+## Quick Start (MATLAB)
+
+```matlab
+% Run from matlab/tests/ directory
+cd matlab/tests
+run_all_tests          % Unit tests for EKF, controller, observability
+
+% Run experiments from matlab/experiments/
+cd ../experiments
+run_baseline_comparison       % Exp 1: Method comparison
+run_observability_validation  % Exp 3: Trajectory observability
+run_noise_sensitivity         % Exp 4: Noise robustness
+plot_results                  % Generate publication figures
+```
+
+## Installation (Simulation)
 
 ```bash
 # Clone the repository
-git clone <repo-url> blocs
-cd blocs
+git clone https://github.com/Eminkaya0/Building-Localization.git
+cd Building-Localization
 
-# Install Python dependencies
+# Install Python dependencies (for YOLOv8 perception)
 pip install -r requirements.txt
-
-# Build ROS2 workspace (when ROS packages are ready)
-# colcon build --packages-select blocs_perception blocs_estimation blocs_control blocs_simulation
 ```
 
 ## Project Structure
 
 ```
+matlab/               — Core algorithms (MATLAB)
+  ekf/                — BuildingEKF class, multi-building tracker
+  control/            — Adaptive altitude controller
+  analysis/           — Observability Gramian, rank analysis, visualization
+  experiments/        — Experiment runners, metrics, plotting
+  utils/              — Camera projection, Jacobian, trajectory generation
+  tests/              — Unit tests
 docs/theory/          — Mathematical derivations (EKF, observability, control law)
 docs/experiments/     — Experiment plans and results
 docs/paper/           — LaTeX paper source
-src/blocs_perception/ — YOLOv8 detection wrapper
-src/blocs_estimation/ — EKF implementation (pure Python, no ROS dependency)
-src/blocs_control/    — Adaptive altitude controller
+src/blocs_perception/ — YOLOv8 detection wrapper (Python/ROS2)
 src/blocs_simulation/ — Gazebo worlds and launch files
-scripts/              — Experiment runners and plotting
-data/                 — Ground truth and results
-tests/                — Unit tests
+data/                 — Ground truth and experiment results
 ```
 
 ## Experiments
