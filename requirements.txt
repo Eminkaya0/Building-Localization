@@ -1,0 +1,22 @@
+# BLOCS - Building Localization with Observer-based Control for UAVs
+# Python dependencies
+
+# Core math
+numpy
+scipy
+
+# Visualization
+matplotlib
+
+# Data handling
+pandas
+pyyaml
+
+# YOLOv8 detection
+ultralytics
+
+# Testing
+pytest
+
+# Utilities
+tqdm
