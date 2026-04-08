@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np
 import json
 from blocs_estimation.ekf_building import BuildingEKF, camera_project
-from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements
+from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements, apply_odometry_drift
 from blocs_estimation.observability import compute_observability_gramian, check_observability
 from blocs_control.altitude_controller import altitude_controller
 from blocs_control.mpc_controller import mpc_altitude_controller, AltitudeMPC, CovariancePredictionModel
@@ -371,6 +371,76 @@ def experiment_lyapunov():
     return results
 
 
+# ============ EXPERIMENT 7: ODOMETRY DRIFT ROBUSTNESS ============
+def experiment_drift():
+    """Compare back-projection vs EKF under increasing odometry drift.
+
+    Uses FIXED altitude (80m) for all methods so drift is the only variable.
+    Back-projection uses the last drifted pose; EKF fuses all drifted measurements.
+    """
+    print("\n=== Experiment 7: Odometry Drift Robustness ===")
+    buildings = building_grid()
+    M = buildings.shape[1]
+    n_seeds = 10
+    sigma_pos_values = [0.0, 0.02, 0.05, 0.1, 0.2]
+    sigma_yaw = 0.005
+    results = {}
+
+    for sigma_pos in sigma_pos_values:
+        odo_errors, ekf_errors = [], []
+
+        for seed in range(n_seeds):
+            np.random.seed(seed)
+            pos_gt, rot_gt, ts = generate_uav_trajectory('lawnmower', altitude=-80, duration=120, dt=0.5)
+
+            if sigma_pos > 0:
+                pos_dr, rot_dr = apply_odometry_drift(pos_gt, rot_gt, ts, sigma_pos, sigma_yaw)
+            else:
+                pos_dr, rot_dr = pos_gt.copy(), [R.copy() for R in rot_gt]
+
+            # Generate measurements: camera sees from TRUE pose, reported pose is drifted
+            meas = generate_synthetic_measurements(
+                buildings, pos_gt, rot_gt, ts, K, R_BC, t_BC, SIGMA,
+                drifted_positions=pos_dr, drifted_rotations=rot_dr)
+
+            # --- Back-projection: uses last drifted pose ---
+            errs_odo = np.full(M, np.nan)
+            for b in range(M):
+                last_z, last_pos, last_R = None, None, None
+                for m in meas:
+                    for d in m['detections']:
+                        if d['building_id'] == b + 1:
+                            last_z, last_pos, last_R = d['z_noisy'], m['uav_pos'], m['uav_R']
+                if last_z is not None:
+                    x_odo = back_project_to_ground(last_z, last_pos, last_R)
+                    errs_odo[b] = np.linalg.norm(x_odo - buildings[:, b])
+            odo_errors.append(np.nanmean(errs_odo))
+
+            # --- EKF at fixed 80m: fuses all drifted measurements ---
+            errs_ekf = np.full(M, np.nan)
+            for b in range(M):
+                x0 = buildings[:, b] + np.array([15*np.random.randn(), 15*np.random.randn(), 5*np.random.randn()])
+                ekf = BuildingEKF(x0, P0, Q, R_PIXEL)
+                for i, m in enumerate(meas):
+                    if i > 0:
+                        ekf.predict(m['time'] - meas[i-1]['time'])
+                    for d in m['detections']:
+                        if d['building_id'] == b + 1:
+                            ekf.update(d['z_noisy'], m['uav_pos'], m['uav_R'], K, R_BC, t_BC)
+                errs_ekf[b] = ekf.position_error(buildings[:, b])
+            ekf_errors.append(np.nanmean(errs_ekf))
+
+        key = f'{sigma_pos}'
+        results[key] = {
+            'odometry': {'mean': float(np.mean(odo_errors)), 'std': float(np.std(odo_errors))},
+            'ekf': {'mean': float(np.mean(ekf_errors)), 'std': float(np.std(ekf_errors))},
+        }
+        print(f"  sigma_pos={sigma_pos}: Odo={np.mean(odo_errors):.2f}m, "
+              f"EKF={np.mean(ekf_errors):.2f}m")
+
+    return results
+
+
 if __name__ == '__main__':
     os.makedirs(RESULTS_DIR, exist_ok=True)
     all_results = {}
@@ -379,6 +449,7 @@ if __name__ == '__main__':
     all_results['noise'] = experiment_noise()
     all_results['mpc_comparison'] = experiment_mpc_comparison()
     all_results['lyapunov'] = experiment_lyapunov()
+    all_results['drift'] = experiment_drift()
 
     with open(os.path.join(RESULTS_DIR, 'all_experiments.json'), 'w') as f:
         json.dump(all_results, f, indent=2)

@@ -102,27 +102,81 @@ def _interpolate_waypoints(waypoints: np.ndarray, speed: float, timestamps: np.n
     return positions, rotations
 
 
+def apply_odometry_drift(positions: np.ndarray, rotations: list,
+                         timestamps: np.ndarray, sigma_pos: float = 0.05,
+                         sigma_yaw: float = 0.005) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """Apply cumulative random-walk drift to simulate odometry error.
+
+    Args:
+        positions: Ground-truth positions [3xN]
+        rotations: Ground-truth rotation matrices [list of 3x3]
+        timestamps: Time stamps [N]
+        sigma_pos: Position drift intensity (m/sqrt(s))
+        sigma_yaw: Heading drift intensity (rad/sqrt(s))
+
+    Returns:
+        (drifted_positions [3xN], drifted_rotations [list of 3x3])
+    """
+    N = positions.shape[1]
+    drifted_pos = positions.copy()
+    drifted_rot = [R.copy() for R in rotations]
+
+    pos_drift = np.zeros(3)
+    yaw_drift = 0.0
+
+    for i in range(1, N):
+        dt = timestamps[i] - timestamps[i - 1]
+        sqrt_dt = np.sqrt(max(dt, 1e-6))
+
+        # Accumulate random walk
+        pos_drift += sigma_pos * sqrt_dt * np.random.randn(3)
+        yaw_drift += sigma_yaw * sqrt_dt * np.random.randn()
+
+        # Apply drift
+        drifted_pos[:, i] = positions[:, i] + pos_drift
+
+        # Apply yaw drift to rotation
+        cy, sy = np.cos(yaw_drift), np.sin(yaw_drift)
+        R_drift = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+        drifted_rot[i] = R_drift @ rotations[i]
+
+    return drifted_pos, drifted_rot
+
+
 def generate_synthetic_measurements(buildings: np.ndarray, positions: np.ndarray,
                                      rotations: list, timestamps: np.ndarray,
                                      K: np.ndarray, R_BC: np.ndarray, t_BC: np.ndarray,
-                                     sigma_pixel: float = 2.0, img_size=None) -> list:
-    """Generate noisy pixel measurements from a UAV trajectory."""
+                                     sigma_pixel: float = 2.0, img_size=None,
+                                     drifted_positions: np.ndarray = None,
+                                     drifted_rotations: list = None) -> list:
+    """Generate noisy pixel measurements from a UAV trajectory.
+
+    If drifted_positions/drifted_rotations are provided, the pixel measurements
+    are generated from ground-truth poses (what the camera actually sees), but
+    the reported uav_pos/uav_R use the drifted values (what odometry reports).
+    """
     from .ekf_building import camera_project
     N = len(timestamps)
     M = buildings.shape[1] if buildings.ndim == 2 else 1
     if buildings.ndim == 1:
         buildings = buildings.reshape(3, 1)
 
+    # Ground-truth poses for projection, drifted poses for reported odometry
+    report_pos = drifted_positions if drifted_positions is not None else positions
+    report_rot = drifted_rotations if drifted_rotations is not None else rotations
+
     measurements = []
     for i in range(N):
         dets = []
         for j in range(M):
+            # Camera sees from TRUE position
             z_true, is_valid = camera_project(buildings[:, j], positions[:, i], rotations[i], K, R_BC, t_BC, img_size)
             if is_valid:
                 z_noisy = z_true + sigma_pixel * np.random.randn(2)
                 dets.append({'building_id': j + 1, 'z_true': z_true, 'z_noisy': z_noisy})
+        # But reported pose is from odometry (possibly drifted)
         measurements.append({
-            'time': timestamps[i], 'uav_pos': positions[:, i],
-            'uav_R': rotations[i], 'detections': dets
+            'time': timestamps[i], 'uav_pos': report_pos[:, i],
+            'uav_R': report_rot[i], 'detections': dets
         })
     return measurements

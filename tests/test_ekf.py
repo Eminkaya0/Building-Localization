@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np
 import pytest
 from blocs_estimation.ekf_building import BuildingEKF, camera_project, camera_project_jacobian
-from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements
+from blocs_estimation.trajectory import generate_uav_trajectory, generate_synthetic_measurements, apply_odometry_drift
 from blocs_estimation.observability import compute_observability_gramian, check_observability
 from blocs_control.altitude_controller import altitude_controller, rate_limiter
 from blocs_control.mpc_controller import mpc_altitude_controller, AltitudeMPC, CovariancePredictionModel
@@ -128,6 +128,47 @@ class TestAltitudeController:
         h_cmd_high = rate_limiter(200.0, 120.0, 1.0)
         assert h_cmd_low >= 20.0
         assert h_cmd_high <= 120.0
+
+
+class TestOdometryDrift:
+    def test_drift_accumulates(self):
+        pos, rot, ts = generate_uav_trajectory('circular',
+            center=[0, 0, -80], radius=50, speed=5, dt=0.5, duration=60)
+        np.random.seed(99)
+        pos_dr, rot_dr = apply_odometry_drift(pos, rot, ts, sigma_pos=0.1, sigma_yaw=0.01)
+        # Drift should grow over time
+        drift_start = np.linalg.norm(pos_dr[:, 10] - pos[:, 10])
+        drift_end = np.linalg.norm(pos_dr[:, -1] - pos[:, -1])
+        assert drift_end > drift_start, "Drift should accumulate"
+        assert drift_end > 0.5, f"Expected significant drift, got {drift_end:.2f}m"
+
+    def test_ekf_robust_to_moderate_drift(self):
+        x_true = np.array([50.0, 30.0, 0.0])
+        pos, rot, ts = generate_uav_trajectory('circular',
+            center=[50, 30, -80], radius=60, speed=5, dt=0.5, duration=80)
+        np.random.seed(42)
+        pos_dr, rot_dr = apply_odometry_drift(pos, rot, ts, sigma_pos=0.05, sigma_yaw=0.005)
+        meas = generate_synthetic_measurements(
+            x_true.reshape(3, 1), pos, rot, ts, K, R_BC, t_BC, SIGMA,
+            drifted_positions=pos_dr, drifted_rotations=rot_dr)
+
+        x0 = x_true + np.array([15.0, -10.0, 5.0])
+        ekf = BuildingEKF(x0, P0, Q, R_PIXEL)
+        for i, m in enumerate(meas):
+            if i > 0:
+                ekf.predict(m['time'] - meas[i-1]['time'])
+            for d in m['detections']:
+                if d['building_id'] == 1:
+                    ekf.update(d['z_noisy'], m['uav_pos'], m['uav_R'], K, R_BC, t_BC)
+        err = ekf.position_error(x_true)
+        assert err < 5.0, f"EKF should handle moderate drift, got {err:.2f}m"
+
+    def test_zero_drift_unchanged(self):
+        pos, rot, ts = generate_uav_trajectory('straight',
+            start_pos=[0, 0, -80], direction=[1, 0, 0], speed=5, dt=0.5, duration=10)
+        np.random.seed(0)
+        pos_dr, rot_dr = apply_odometry_drift(pos, rot, ts, sigma_pos=0.0, sigma_yaw=0.0)
+        assert np.allclose(pos, pos_dr), "Zero drift should not change positions"
 
 
 class TestMPCController:

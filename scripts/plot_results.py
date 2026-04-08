@@ -156,6 +156,38 @@ def fig_eigenvalue_spectrum(data):
     print("  Saved eigenvalue_spectrum.pdf/png")
 
 
+def fig_drift_comparison(data):
+    """Line plot: RMSE vs odometry drift for back-projection vs EKF."""
+    if 'drift' not in data:
+        print("  Skipping drift plot (no data)")
+        return
+
+    dr = data['drift']
+    sigmas = sorted([float(k) for k in dr.keys()])
+    odo_means = [dr[str(s)]['odometry']['mean'] for s in sigmas]
+    ekf_means = [dr[str(s)]['ekf']['mean'] for s in sigmas]
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.2))
+    ax.plot(sigmas, odo_means, 'o-', color='#e74c3c', markersize=4, linewidth=1.2,
+            label='Back-projection', markeredgecolor='#c0392b', markeredgewidth=0.8)
+    ax.plot(sigmas, ekf_means, 's-', color='#2980b9', markersize=4, linewidth=1.2,
+            label='EKF (fixed 80m)', markeredgecolor='#2c3e50', markeredgewidth=0.8)
+
+    ax.set_xlabel(r'Drift intensity $\sigma_{\mathrm{pos}}$ (m/$\sqrt{\mathrm{s}}$)')
+    ax.set_ylabel('RMSE (m)')
+    ax.set_xlim(-0.01, 0.21)
+    ax.set_ylim(0, 7)
+    ax.legend(frameon=False, fontsize=7)
+    ax.grid(alpha=0.3, linewidth=0.5)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    fig.savefig(os.path.join(FIG_DIR, 'drift_comparison.pdf'))
+    fig.savefig(os.path.join(FIG_DIR, 'drift_comparison.png'))
+    plt.close(fig)
+    print("  Saved drift_comparison.pdf/png")
+
+
 if __name__ == '__main__':
     print("Generating publication figures...")
     data = load_results()
@@ -163,4 +195,5 @@ if __name__ == '__main__':
     fig_noise_sensitivity(data)
     fig_observability_comparison(data)
     fig_eigenvalue_spectrum(data)
+    fig_drift_comparison(data)
     print(f"\nAll figures saved to {FIG_DIR}/")
